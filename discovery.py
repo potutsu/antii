@@ -135,7 +135,11 @@ _SPORTS_SLUGS = {
 
 
 def _event_tag_slugs(event: dict) -> set:
-    """Return set of lowercase tag slugs + labels from an event."""
+    """
+    Return set of lowercase tag strings from an event or market.
+    Handles both plain string tags (sampling-markets format)
+    and dict tags (Gamma events format).
+    """
     slugs = set()
     for t in (event.get("tags") or []):
         if isinstance(t, dict):
@@ -148,10 +152,63 @@ def _event_tag_slugs(event: dict) -> set:
     return slugs
 
 
+def _market_tags(market: dict) -> set:
+    """Extract tags from a sampling-markets record (plain strings)."""
+    tags = set()
+    for t in (market.get("tags") or []):
+        if isinstance(t, str):
+            tags.add(t.lower().strip())
+        elif isinstance(t, dict):
+            for key in ("slug", "label"):
+                v = str(t.get(key, "") or "").lower().strip()
+                if v:
+                    tags.add(v)
+    return tags
+
+
+def _category_from_tags(tags: set) -> str:
+    """
+    Map plain string tags from /sampling-markets to category.
+    Tags here are labels like 'Politics', 'Crypto', 'Economics'.
+    """
+    # Direct label matches (case-insensitive, already lowered)
+    label_map = {
+        "politics": "politics", "elections": "politics", "election": "politics",
+        "us election": "politics", "midterms": "politics", "primaries": "politics",
+        "primary elections": "politics", "democratic primary": "politics",
+        "house elections": "politics", "senate": "politics",
+        "geopolitics": "geopolitics", "war": "geopolitics",
+        "middle east": "geopolitics", "ukraine": "geopolitics",
+        "russia": "geopolitics", "china": "geopolitics", "iran": "geopolitics",
+        "israel": "geopolitics", "nato": "geopolitics", "military": "geopolitics",
+        "nuclear": "geopolitics", "ceasefire": "geopolitics",
+        "economics": "economics", "economy": "economics",
+        "federal reserve": "economics", "fed": "economics",
+        "interest rates": "economics", "inflation": "economics",
+        "recession": "economics", "gdp": "economics",
+        "economic policy": "economics", "tariff": "economics",
+        "crypto": "crypto", "cryptocurrency": "crypto",
+        "bitcoin": "crypto", "ethereum": "crypto",
+        "defi": "crypto", "nft": "crypto", "web3": "crypto",
+        "solana": "crypto", "btc": "crypto",
+        "ai": "tech", "artificial intelligence": "tech",
+        "tech": "tech", "technology": "tech",
+        "openai": "tech", "antitrust": "tech",
+    }
+    for tag in tags:
+        cat = label_map.get(tag)
+        if cat:
+            return cat
+    return ""
+
+
 def _category_from_title(title: str) -> str:
     """Last-resort: infer category from market title keywords."""
     t = title.lower()
-    if any(k in t for k in ("bitcoin", "ethereum", "crypto", "btc ", "eth ", "defi", "solana")):
+    if any(k in t for k in ("bitcoin", "ethereum", "crypto", "btc", "eth", "defi", "solana",
+                             "uni ", "aave", "chainlink", "polygon", "matic", "avax",
+                             "base chain", "hyperliquid", "token", "coin price",
+                             "market cap", "altcoin")):
         return "crypto"
     if any(k in t for k in ("fed ", "fomc", "rate cut", "rate hike", "cpi", "recession",
                              "inflation", "gdp", "tariff", "trade war", "unemployment")):
@@ -244,12 +301,15 @@ def scan():
     signals  = 0
 
     # ── Pass 1: static filters (no CLOB calls) ───────────────────
+    # /sampling-markets: condition_id, tags=plain strings, volume24hr=None
+    # Category from string tags + title fallback. No volume filter (None on this endpoint).
     candidates = []
-    skip_stats = {"dedup":0,"not_binary":0,"sports":0,"no_cat":0,"vol_liq":0,"no_token":0,"price_range":0}
+    skip_stats = {"dedup":0,"not_binary":0,"sports":0,"no_cat":0,"no_token":0,"price_range":0}
 
     for mkt in markets:
         try:
-            cid = mkt.get("condition_id") or mkt.get("conditionId", "")
+            # /sampling-markets uses condition_id not conditionId
+            cid = str(mkt.get("condition_id") or mkt.get("conditionId") or "").strip()
             if not cid or cid in seen_ids:
                 skip_stats["dedup"] += 1
                 continue
@@ -258,42 +318,45 @@ def scan():
                 skip_stats["not_binary"] += 1
                 continue
 
-            # Category from gamma cat_map — no CLOB needed
-            category = cat_map.get(cid, "")
+            # Tags are plain strings on /sampling-markets
+            tags = _market_tags(mkt)
+
+            # Block sports
+            if tags & _SPORTS_SLUGS:
+                skip_stats["sports"] += 1
+                continue
+
+            # Category: try string tag labels first, then title keywords
+            category = _category_from_tags(tags)
             if not category:
-                # Fallback: title keyword match
                 category = _category_from_title(mkt.get("question", ""))
             if not category:
                 skip_stats["no_cat"] += 1
                 continue
 
-            # Volume / liquidity from static market data
-            vol24 = float(mkt.get("volume24hr", mkt.get("volume_24h", 0)) or 0)
-            liq   = float(mkt.get("liquidity", 0) or 0)
-            if vol24 < MIN_VOLUME_24H or liq < MIN_LIQUIDITY:
-                skip_stats["vol_liq"] += 1
-                continue
-
-            # YES token exists
+            # YES token
             yes_tok = extract_yes_token(mkt)
             if not yes_tok:
                 skip_stats["no_token"] += 1
                 continue
-            token_id = yes_tok.get("token_id") or yes_tok.get("tokenId", "")
+            token_id = str(yes_tok.get("token_id") or "").strip()
             if not token_id:
                 skip_stats["no_token"] += 1
                 continue
 
-            # Price range from embedded token price (no CLOB call yet)
-            yes_price_static = float(yes_tok.get("price", 0) or 0)
+            # Price range from embedded token price (no CLOB call)
+            yes_price_static = float(yes_tok.get("price") or 0)
             if yes_price_static > 0:
                 if not (YES_PRICE_MIN <= yes_price_static <= YES_PRICE_MAX):
                     skip_stats["price_range"] += 1
                     continue
 
-            no_tok = next((t for t in mkt.get("tokens", []) if
-                           (t.get("outcome") or "").lower() == "no"), None)
-            no_token_id = no_tok.get("token_id", "") if no_tok else ""
+            no_tok = next(
+                (t for t in mkt.get("tokens", [])
+                 if (t.get("outcome") or "").lower() == "no"),
+                None,
+            )
+            no_token_id = str(no_tok.get("token_id") or "") if no_tok else ""
 
             candidates.append({
                 "cid":          cid,
@@ -301,8 +364,7 @@ def scan():
                 "category":     category,
                 "token_id_yes": token_id,
                 "token_id_no":  no_token_id,
-                "vol24":        vol24,
-                "liq":          liq,
+                "tags":         list(tags),
             })
 
         except Exception as e:
@@ -350,11 +412,12 @@ def scan():
                 "category":        c["category"],
                 "token_id_yes":    token_id,
                 "token_id_no":     c["token_id_no"],
+                "tags":            c.get("tags", []),
                 "yes_price_60m":   round(yes_60m,  4),
                 "yes_price_now":   round(yes_now,  4),
                 "move_pct":        round(move_pct, 2),
-                "volume_24h":      c["vol24"],
-                "liquidity":       c["liq"],
+                "volume_24h":      None,   # not available from /sampling-markets
+                "liquidity":       None,   # not available from /sampling-markets
                 "base_rate":       base_rate,
                 "base_rate_label": br_label,
                 "news_at_signal":  news,
