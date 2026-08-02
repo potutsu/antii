@@ -99,6 +99,23 @@ def get_price_60min_ago(token_id: str) -> Optional[float]:
     return float(point["p"])
 
 
+def get_price_60min_ago_with_depth(token_id: str) -> tuple[Optional[float], int]:
+    """
+    Like get_price_60min_ago but also returns the total number of history points
+    in the last 24h. Used as a liquidity proxy: active markets have many points
+    (each represents a trade or price update); illiquid/stale markets have few.
+
+    Returns: (price_60m_ago, point_count)
+      price_60m_ago — None if history has < 61 points
+      point_count   — total points in the 1d/fidelity=1 response (0 if fetch failed)
+    """
+    history = fetch_price_history(token_id, interval="1d", fidelity=1)
+    n = len(history)
+    if n < 61:
+        return None, n
+    return float(history[-61]["p"]), n
+
+
 # ── Real-time price ────────────────────────────────────────────────
 
 def fetch_last_trade_price(token_id: str) -> Optional[float]:

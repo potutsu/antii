@@ -4,7 +4,7 @@ discovery.py — Scans Polymarket every 5 min for overreaction signals.
 Signal criteria:
   - Binary market (YES/NO only)
   - Category in ALLOWED_CATEGORIES, no sports tags
-  - volume_24h >= MIN_VOLUME_24H, liquidity >= MIN_LIQUIDITY
+  - prices-history depth >= MIN_HISTORY_POINTS (liquidity proxy; sampling-markets volume fields are null)
   - YES price currently between YES_PRICE_MIN and YES_PRICE_MAX
   - YES price rose >= ENTRY_MIN_MOVE_60MIN% in the last 60 minutes
 
@@ -22,8 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from antii_config import (
     DISCOVERY_INTERVAL_SEC,
     ENTRY_MIN_MOVE_60MIN,
-    MIN_VOLUME_24H,
-    MIN_LIQUIDITY,
+    MIN_HISTORY_POINTS,
     YES_PRICE_MIN,
     YES_PRICE_MAX,
     ALLOWED_CATEGORIES,
@@ -35,7 +34,7 @@ from polymarket import (
     fetch_sampling_markets,
     fetch_gamma_events,
     fetch_last_trade_price,
-    get_price_60min_ago,
+    get_price_60min_ago_with_depth,
     extract_yes_token,
     is_binary_market,
 )
@@ -304,7 +303,7 @@ def scan():
     # /sampling-markets: condition_id, tags=plain strings, volume24hr=None
     # Category from string tags + title fallback. No volume filter (None on this endpoint).
     candidates = []
-    skip_stats = {"dedup":0,"not_binary":0,"sports":0,"vol_liq":0,"no_cat":0,"no_token":0,"price_range":0}
+    skip_stats = {"dedup":0,"not_binary":0,"sports":0,"no_cat":0,"no_token":0,"price_range":0,"thin_market":0}
 
     for mkt in markets:
         try:
@@ -316,15 +315,6 @@ def scan():
 
             if not is_binary_market(mkt):
                 skip_stats["not_binary"] += 1
-                continue
-
-            # Volume + liquidity filter — /sampling-markets returns volume24hr and liquidity.
-            # Both fields can be None (market never traded) or a numeric string/float.
-            # Skip markets that don't meet the minimum thresholds.
-            vol24h = float(mkt.get("volume24hr") or mkt.get("volume_24h") or 0)
-            liq    = float(mkt.get("liquidity") or 0)
-            if vol24h < MIN_VOLUME_24H or liq < MIN_LIQUIDITY:
-                skip_stats["vol_liq"] += 1
                 continue
 
             # Tags are plain strings on /sampling-markets
@@ -374,8 +364,6 @@ def scan():
                 "token_id_yes": token_id,
                 "token_id_no":  no_token_id,
                 "tags":         list(tags),
-                "volume_24h":   vol24h,
-                "liquidity":    liq,
             })
 
         except Exception as e:
@@ -400,9 +388,15 @@ def scan():
             if not (YES_PRICE_MIN <= yes_now <= YES_PRICE_MAX):
                 continue
 
-            # 60-min price history
-            yes_60m = get_price_60min_ago(token_id)
+            # 60-min price history + depth check (liquidity proxy).
+            # prices-history point count = number of price updates in last 24h.
+            # Thin/stale markets have very few points; MIN_HISTORY_POINTS gates them out
+            # without relying on volume24hr/liquidity fields (which sampling-markets returns null).
+            yes_60m, history_depth = get_price_60min_ago_with_depth(token_id)
             if yes_60m is None or yes_60m <= 0:
+                continue
+            if history_depth < MIN_HISTORY_POINTS:
+                skip_stats["thin_market"] += 1
                 continue
 
             move_pct = (yes_now - yes_60m) / yes_60m * 100
@@ -427,8 +421,9 @@ def scan():
                 "yes_price_60m":   round(yes_60m,  4),
                 "yes_price_now":   round(yes_now,  4),
                 "move_pct":        round(move_pct, 2),
-                "volume_24h":      c.get("volume_24h"),   # from /sampling-markets volume24hr
-                "liquidity":       c.get("liquidity"),     # from /sampling-markets liquidity
+                "history_depth":   history_depth,         # 24h price-update count (liquidity proxy)
+                "volume_24h":      None,                  # not available from sampling-markets
+                "liquidity":       None,                  # not available from sampling-markets
                 "base_rate":       base_rate,
                 "base_rate_label": br_label,
                 "news_at_signal":  news,
