@@ -200,10 +200,21 @@ def run_batch(force: bool = False):
     computed  = load_already_computed() if not force else set()
     new_count = 0
 
+    stale_count = 0
+
     for pos in closed:
         pid = pos["position_id"]
         if pid in computed:
             continue
+
+        # Skip stale exits — exit price == entry price means no trades occurred
+        # during the hold. These produce $0.00 P&L and corrupt MFE/MAE averages.
+        if pos.get("data_quality") == "stale_exit":
+            stale_count += 1
+            log(f"SKIP stale_exit {pid}")
+            computed.add(pid)   # mark so we don't revisit on every run
+            continue
+
         try:
             pm = compute_postmortem(pos)
             if pm:
@@ -216,7 +227,8 @@ def run_batch(force: bool = False):
         except Exception as e:
             log(f"ERROR {pid}: {e}")
 
-    log(f"batch complete — {new_count} new postmortems ({len(closed)} closed total)")
+    log(f"batch complete — {new_count} new postmortems  {stale_count} stale skipped  "
+        f"({len(closed)} closed total)")
     return new_count
 
 
@@ -248,6 +260,10 @@ def main():
                 for pos in closed:
                     pid = pos["position_id"]
                     if pid in computed:
+                        continue
+                    if pos.get("data_quality") == "stale_exit":
+                        log(f"SKIP stale_exit {pid}")
+                        computed.add(pid)
                         continue
                     pm = compute_postmortem(pos)
                     if pm:

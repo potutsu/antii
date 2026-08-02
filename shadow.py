@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from antii_config import SHADOW_POLL_SEC, SHADOW_POST_CLOSE_HOURS
+from antii_config import SHADOW_POLL_SEC, SHADOW_POST_CLOSE_HOURS, MONITOR_POS_POLL_SEC
 from paths import ensure_dirs, SIGNAL_JSONL, PAPER_POSITIONS, SHADOW_LOG
 from polymarket import fetch_last_trade_price
 
@@ -92,21 +92,23 @@ def should_log(signal: dict, pos: dict | None, last_log_ts: float) -> tuple[bool
     """
     Returns (should_log, phase).
     phase: pre_open | open | post_close | expired
+
+    Poll cadence by phase:
+      open       → MONITOR_POS_POLL_SEC (5 min) — tight enough to capture intra-day swings
+      pre_open   → SHADOW_POLL_SEC (15 min) — no position yet, coarser is fine
+      post_close → SHADOW_POLL_SEC (15 min) — background collection, no urgency
     """
-    now      = time.time()
+    now        = time.time()
     sig_status = signal.get("status", "new")
 
     # Never log discarded signals
     if sig_status == "discarded":
         return False, "expired"
 
-    # Respect 15-min interval
-    if now - last_log_ts < SHADOW_POLL_SEC:
-        return False, ""
-
     if pos is None:
-        # No position yet — pre-open phase
-        # Stop logging if signal is very old and not entered
+        # No position yet — pre-open phase, use coarse interval
+        if now - last_log_ts < SHADOW_POLL_SEC:
+            return False, ""
         signal_age_h = (now - signal.get("signal_ts", now)) / 3600
         if signal_age_h > 4:   # give up shadow if signal aged out with no entry
             return False, "expired"
@@ -115,10 +117,15 @@ def should_log(signal: dict, pos: dict | None, last_log_ts: float) -> tuple[bool
     pos_status = pos.get("status", "open")
 
     if pos_status == "open":
+        # Use tighter 5-min cadence so MFE/MAE are meaningful
+        if now - last_log_ts < MONITOR_POS_POLL_SEC:
+            return False, ""
         return True, "open"
 
     if pos_status == "closed":
-        close_ts   = pos.get("close_ts", now)
+        if now - last_log_ts < SHADOW_POLL_SEC:
+            return False, ""
+        close_ts    = pos.get("close_ts", now)
         hours_since = (now - close_ts) / 3600
         if hours_since <= SHADOW_POST_CLOSE_HOURS:
             return True, "post_close"

@@ -137,13 +137,12 @@ def process_signal(sig: dict, open_positions: int) -> tuple[str | None, dict | N
         v = make_verdict(sig, "ENTER", current_px, "reversion_confirmed")
         return "entered", v, current_px
 
-    # ── Timeout — enter anyway if still in range ───────────────────
+    # ── Timeout — discard if no reversion within the watch window ──
+    # Entering at signal price has no edge: it means the spike didn't fade,
+    # which is evidence the move was real (not overreaction). Discard only.
     if age_min >= ENTRY_MAX_WAIT_MIN:
-        if open_positions >= MAX_OPEN_POSITIONS:
-            v = make_verdict(sig, "DISCARD", current_px, "position_cap_at_timeout")
-            return "discarded", v, current_px
-        v = make_verdict(sig, "ENTER", current_px, "timeout_entry")
-        return "entered", v, current_px
+        v = make_verdict(sig, "DISCARD", current_px, "no_reversion_timeout")
+        return "discarded", v, current_px
 
     return "watching", None, current_px
 

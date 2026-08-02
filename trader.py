@@ -141,6 +141,11 @@ def close_position(pos: dict, exit_verdict: dict) -> dict:
     """
     Close a paper position. Update P&L.
     We hold NO tokens: value at exit = shares * (1 - current_yes_price)
+
+    Stale exit: if exit_yes_price == entry_yes_price exactly, the market
+    likely had no trades during the hold — last-trade-price returned a stale
+    value. These are flagged as data_quality="stale_exit" and excluded from
+    strategy analytics.
     """
     exit_yes_px  = exit_verdict["exit_price"]
     exit_no_val  = round(1.0 - exit_yes_px, 4)
@@ -150,6 +155,11 @@ def close_position(pos: dict, exit_verdict: dict) -> dict:
 
     # Correct = YES price fell (NO tokens appreciated)
     correct = exit_no_val > pos["entry_no_cost"]
+
+    # Flag stale exits: exit price identical to entry price means no trades
+    # occurred during the hold period — the price feed returned a stale quote.
+    stale = abs(exit_yes_px - pos["entry_yes_price"]) < 0.0001
+    data_quality = "stale_exit" if stale else "ok"
 
     pos = dict(pos)
     pos.update({
@@ -163,7 +173,10 @@ def close_position(pos: dict, exit_verdict: dict) -> dict:
         "correct":         correct,
         "exit_reason":     exit_verdict.get("exit_reason", ""),
         "exit_verdict_id": exit_verdict["verdict_id"],
+        "data_quality":    data_quality,
     })
+    if stale:
+        log(f"STALE EXIT {pos['position_id']}  entry=exit={exit_yes_px:.4f}  market had no trades")
     return pos
 
 

@@ -304,7 +304,7 @@ def scan():
     # /sampling-markets: condition_id, tags=plain strings, volume24hr=None
     # Category from string tags + title fallback. No volume filter (None on this endpoint).
     candidates = []
-    skip_stats = {"dedup":0,"not_binary":0,"sports":0,"no_cat":0,"no_token":0,"price_range":0}
+    skip_stats = {"dedup":0,"not_binary":0,"sports":0,"vol_liq":0,"no_cat":0,"no_token":0,"price_range":0}
 
     for mkt in markets:
         try:
@@ -316,6 +316,15 @@ def scan():
 
             if not is_binary_market(mkt):
                 skip_stats["not_binary"] += 1
+                continue
+
+            # Volume + liquidity filter — /sampling-markets returns volume24hr and liquidity.
+            # Both fields can be None (market never traded) or a numeric string/float.
+            # Skip markets that don't meet the minimum thresholds.
+            vol24h = float(mkt.get("volume24hr") or mkt.get("volume_24h") or 0)
+            liq    = float(mkt.get("liquidity") or 0)
+            if vol24h < MIN_VOLUME_24H or liq < MIN_LIQUIDITY:
+                skip_stats["vol_liq"] += 1
                 continue
 
             # Tags are plain strings on /sampling-markets
@@ -365,6 +374,8 @@ def scan():
                 "token_id_yes": token_id,
                 "token_id_no":  no_token_id,
                 "tags":         list(tags),
+                "volume_24h":   vol24h,
+                "liquidity":    liq,
             })
 
         except Exception as e:
@@ -416,8 +427,8 @@ def scan():
                 "yes_price_60m":   round(yes_60m,  4),
                 "yes_price_now":   round(yes_now,  4),
                 "move_pct":        round(move_pct, 2),
-                "volume_24h":      None,   # not available from /sampling-markets
-                "liquidity":       None,   # not available from /sampling-markets
+                "volume_24h":      c.get("volume_24h"),   # from /sampling-markets volume24hr
+                "liquidity":       c.get("liquidity"),     # from /sampling-markets liquidity
                 "base_rate":       base_rate,
                 "base_rate_label": br_label,
                 "news_at_signal":  news,
