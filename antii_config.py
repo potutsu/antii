@@ -21,7 +21,8 @@ EXIT_MAX_HOLD_HOURS     = float(os.environ.get("EXIT_MAX_HOLD_HOURS",     48.0))
 EXIT_STOP_LOSS_PCT      = float(os.environ.get("EXIT_STOP_LOSS_PCT",      15.0))  # % rise from entry → stop loss
 
 # ── Market Filters ─────────────────────────────────────────────────
-MIN_HISTORY_POINTS      = int(os.environ.get("MIN_HISTORY_POINTS",          60))   # min 1-min price history points (proxy for liquidity)
+MIN_VOLUME_24H          = float(os.environ.get("MIN_VOLUME_24H",          5000))  # USD — from gamma events volume24hr
+MIN_LIQUIDITY           = float(os.environ.get("MIN_LIQUIDITY",           2000))  # USD — from gamma events liquidity
 YES_PRICE_MIN           = float(os.environ.get("YES_PRICE_MIN",           0.05))
 YES_PRICE_MAX           = float(os.environ.get("YES_PRICE_MAX",           0.45))
 ALLOWED_CATEGORIES      = {"politics", "geopolitics", "economics", "crypto", "tech"}

@@ -4,7 +4,7 @@ discovery.py — Scans Polymarket every 5 min for overreaction signals.
 Signal criteria:
   - Binary market (YES/NO only)
   - Category in ALLOWED_CATEGORIES, no sports tags
-  - prices-history depth >= MIN_HISTORY_POINTS (liquidity proxy; sampling-markets volume fields are null)
+  - volume_24h >= MIN_VOLUME_24H AND liquidity >= MIN_LIQUIDITY  (from gamma events — sampling-markets has no vol fields)
   - YES price currently between YES_PRICE_MIN and YES_PRICE_MAX
   - YES price rose >= ENTRY_MIN_MOVE_60MIN% in the last 60 minutes
 
@@ -22,7 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from antii_config import (
     DISCOVERY_INTERVAL_SEC,
     ENTRY_MIN_MOVE_60MIN,
-    MIN_HISTORY_POINTS,
+    MIN_VOLUME_24H,
+    MIN_LIQUIDITY,
     YES_PRICE_MIN,
     YES_PRICE_MAX,
     ALLOWED_CATEGORIES,
@@ -34,7 +35,7 @@ from polymarket import (
     fetch_sampling_markets,
     fetch_gamma_events,
     fetch_last_trade_price,
-    get_price_60min_ago_with_depth,
+    get_price_60min_ago,
     extract_yes_token,
     is_binary_market,
 )
@@ -269,6 +270,26 @@ def build_category_map(gamma_events: list[dict]) -> dict[str, str]:
     return cat_map
 
 
+def build_vol_map(gamma_events: list[dict]) -> dict[str, dict]:
+    """
+    Build {condition_id: {volume24hr, liquidity}} from Gamma events.
+
+    Gamma market objects (inside events) have conditionId, volume24hr, and liquidity
+    as reliable numeric fields. sampling-markets has none of these.
+    """
+    vol_map = {}
+    for ev in gamma_events:
+        for m in ev.get("markets", []):
+            cid = m.get("conditionId") or m.get("condition_id")
+            if not cid:
+                continue
+            vol_map[cid] = {
+                "volume_24h": float(m.get("volume24hr") or 0),
+                "liquidity":  float(m.get("liquidity")  or 0),
+            }
+    return vol_map
+
+
 def is_sports(tag_slugs: set) -> bool:
     return bool(tag_slugs & _SPORTS_SLUGS)
 
@@ -292,9 +313,11 @@ def scan():
     try:
         gamma_events = fetch_gamma_events(limit=500)
         cat_map      = build_category_map(gamma_events)
+        vol_map      = build_vol_map(gamma_events)
     except Exception as e:
         log(f"WARN could not fetch gamma events: {e}")
         cat_map = {}
+        vol_map = {}
 
     seen_ids = load_seen_ids()
     signals  = 0
@@ -303,7 +326,7 @@ def scan():
     # /sampling-markets: condition_id, tags=plain strings, volume24hr=None
     # Category from string tags + title fallback. No volume filter (None on this endpoint).
     candidates = []
-    skip_stats = {"dedup":0,"not_binary":0,"sports":0,"no_cat":0,"no_token":0,"price_range":0,"thin_market":0}
+    skip_stats = {"dedup":0,"not_binary":0,"sports":0,"vol_liq":0,"no_cat":0,"no_token":0,"price_range":0}
 
     for mkt in markets:
         try:
@@ -315,6 +338,16 @@ def scan():
 
             if not is_binary_market(mkt):
                 skip_stats["not_binary"] += 1
+                continue
+
+            # Volume + liquidity from gamma vol_map (indexed by conditionId).
+            # sampling-markets has no volume fields; gamma market objects do.
+            # Markets not in vol_map (not yet in gamma) are treated as zero volume.
+            vol_info = vol_map.get(cid, {})
+            vol24h   = vol_info.get("volume_24h", 0.0)
+            liq      = vol_info.get("liquidity",  0.0)
+            if vol24h < MIN_VOLUME_24H or liq < MIN_LIQUIDITY:
+                skip_stats["vol_liq"] += 1
                 continue
 
             # Tags are plain strings on /sampling-markets
@@ -364,6 +397,8 @@ def scan():
                 "token_id_yes": token_id,
                 "token_id_no":  no_token_id,
                 "tags":         list(tags),
+                "volume_24h":   vol24h,
+                "liquidity":    liq,
             })
 
         except Exception as e:
@@ -388,15 +423,9 @@ def scan():
             if not (YES_PRICE_MIN <= yes_now <= YES_PRICE_MAX):
                 continue
 
-            # 60-min price history + depth check (liquidity proxy).
-            # prices-history point count = number of price updates in last 24h.
-            # Thin/stale markets have very few points; MIN_HISTORY_POINTS gates them out
-            # without relying on volume24hr/liquidity fields (which sampling-markets returns null).
-            yes_60m, history_depth = get_price_60min_ago_with_depth(token_id)
+            # 60-min price history
+            yes_60m = get_price_60min_ago(token_id)
             if yes_60m is None or yes_60m <= 0:
-                continue
-            if history_depth < MIN_HISTORY_POINTS:
-                skip_stats["thin_market"] += 1
                 continue
 
             move_pct = (yes_now - yes_60m) / yes_60m * 100
@@ -422,8 +451,8 @@ def scan():
                 "yes_price_now":   round(yes_now,  4),
                 "move_pct":        round(move_pct, 2),
                 "history_depth":   history_depth,         # 24h price-update count (liquidity proxy)
-                "volume_24h":      None,                  # not available from sampling-markets
-                "liquidity":       None,                  # not available from sampling-markets
+                "volume_24h":      c.get("volume_24h"),   # from gamma events volume24hr
+                "liquidity":       c.get("liquidity"),     # from gamma events liquidity
                 "base_rate":       base_rate,
                 "base_rate_label": br_label,
                 "news_at_signal":  news,
