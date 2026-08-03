@@ -116,6 +116,27 @@ def get_price_60min_ago_with_depth(token_id: str) -> tuple[Optional[float], int]
     return float(history[-61]["p"]), n
 
 
+# ── Gamma market lookup ────────────────────────────────────────────
+
+def fetch_gamma_market_by_token(yes_token_id: str) -> Optional[dict]:
+    """
+    GET gamma /markets?clob_token_ids=<yes_token_id>
+
+    Gamma indexes CLOB markets by their YES token ID. This is the only reliable
+    bridge between sampling-markets (CLOB) and gamma (which has volume24hr +
+    liquidity). Returns the first matching market dict, or None.
+
+    Confirmed working: returns conditionId, volume24hr (float), liquidity (str/float).
+    Called only on candidates that already passed static filters and price checks,
+    so the call volume is low (typically 0-5 per scan cycle).
+    """
+    data = _get(f"{GAMMA_BASE}/markets", params={"clob_token_ids": yes_token_id})
+    if not data:
+        return None
+    items = data if isinstance(data, list) else data.get("data", [])
+    return items[0] if items else None
+
+
 # ── Real-time price ────────────────────────────────────────────────
 
 def fetch_last_trade_price(token_id: str) -> Optional[float]:

@@ -4,9 +4,11 @@ discovery.py — Scans Polymarket every 5 min for overreaction signals.
 Signal criteria:
   - Binary market (YES/NO only)
   - Category in ALLOWED_CATEGORIES, no sports tags
-  - volume_24h >= MIN_VOLUME_24H AND liquidity >= MIN_LIQUIDITY  (from gamma events — sampling-markets has no vol fields)
   - YES price currently between YES_PRICE_MIN and YES_PRICE_MAX
   - YES price rose >= ENTRY_MIN_MOVE_60MIN% in the last 60 minutes
+  - volume_24h >= MIN_VOLUME_24H AND liquidity >= MIN_LIQUIDITY
+    (fetched from gamma /markets?clob_token_ids= — the only reliable bridge
+     between sampling-markets CLOB IDs and gamma volume/liquidity data)
 
 Emits to: data/signal.jsonl
 """
@@ -33,8 +35,8 @@ from antii_config import (
 from paths import ensure_dirs, SIGNAL_JSONL
 from polymarket import (
     fetch_sampling_markets,
-    fetch_gamma_events,
     fetch_last_trade_price,
+    fetch_gamma_market_by_token,
     get_price_60min_ago,
     extract_yes_token,
     is_binary_market,
@@ -77,52 +79,6 @@ def load_seen_ids() -> set[str]:
     return seen
 
 
-# ── Tag slug → category mapping ────────────────────────────────────
-# Gamma tags use specific slugs that don't match ALLOWED_CATEGORIES directly.
-# This maps known tag slugs/labels to our category buckets.
-_TAG_TO_CATEGORY = {
-    # politics
-    "politics": "politics", "political": "politics", "election": "politics",
-    "elections": "politics", "president": "politics", "congress": "politics",
-    "senate": "politics", "democrat": "politics", "republican": "politics",
-    "trump": "politics", "biden": "politics", "harris": "politics",
-    "white-house": "politics", "donald-trump": "politics",
-    "us-politics": "politics", "government": "politics",
-    "2024-elections": "politics", "2026-elections": "politics",
-    "executive-order": "politics", "supreme-court": "politics",
-    # geopolitics
-    "geopolitics": "geopolitics", "geopolitical": "geopolitics",
-    "war": "geopolitics", "nato": "geopolitics", "military": "geopolitics",
-    "iran": "geopolitics", "ukraine": "geopolitics", "russia": "geopolitics",
-    "china": "geopolitics", "taiwan": "geopolitics", "middle-east": "geopolitics",
-    "north-korea": "geopolitics", "israel": "geopolitics", "gaza": "geopolitics",
-    "sanctions": "geopolitics", "nuclear": "geopolitics",
-    "ceasefire": "geopolitics", "invasion": "geopolitics",
-    # economics / macro
-    "economy": "economics", "economics": "economics",
-    "economic-policy": "economics", "fed": "economics",
-    "fed-rates": "economics", "fomc": "economics",
-    "jerome-powell": "economics", "inflation": "economics",
-    "cpi": "economics", "cpi-release": "economics",
-    "recession": "economics", "gdp": "economics",
-    "interest-rates": "economics", "treasury": "economics",
-    "fiscal": "economics", "tariff": "economics",
-    "trade": "economics", "trade-war": "economics",
-    "unemployment": "economics", "jobs": "economics",
-    "economic-indicators": "economics",
-    # crypto
-    "crypto": "crypto", "cryptocurrency": "crypto",
-    "bitcoin": "crypto", "ethereum": "crypto",
-    "defi": "crypto", "nft": "crypto", "web3": "crypto",
-    "solana": "crypto", "btc": "crypto", "eth": "crypto",
-    "crypto-prices": "crypto",
-    # tech
-    "ai": "tech", "openai": "tech",
-    "artificial-intelligence": "tech", "tech": "tech",
-    "technology": "tech", "antitrust": "tech",
-    "ipo": "tech",
-}
-
 # Sports tag slugs — block these
 _SPORTS_SLUGS = {
     "sports", "soccer", "football", "basketball", "baseball", "tennis",
@@ -132,24 +88,6 @@ _SPORTS_SLUGS = {
     "champions-league", "premier-league", "nba-offseason",
     "nba-free-agency", "fifa", "la-liga", "bundesliga", "serie-a",
 }
-
-
-def _event_tag_slugs(event: dict) -> set:
-    """
-    Return set of lowercase tag strings from an event or market.
-    Handles both plain string tags (sampling-markets format)
-    and dict tags (Gamma events format).
-    """
-    slugs = set()
-    for t in (event.get("tags") or []):
-        if isinstance(t, dict):
-            for key in ("slug", "label"):
-                v = str(t.get(key, "") or "").lower().strip()
-                if v:
-                    slugs.add(v)
-        elif isinstance(t, str):
-            slugs.add(t.lower().strip())
-    return slugs
 
 
 def _market_tags(market: dict) -> set:
@@ -177,23 +115,31 @@ def _category_from_tags(tags: set) -> str:
         "us election": "politics", "midterms": "politics", "primaries": "politics",
         "primary elections": "politics", "democratic primary": "politics",
         "house elections": "politics", "senate": "politics",
+        "government": "politics", "government shutdown": "politics",
+        "congress": "politics", "impeachment": "politics",
         "geopolitics": "geopolitics", "war": "geopolitics",
         "middle east": "geopolitics", "ukraine": "geopolitics",
         "russia": "geopolitics", "china": "geopolitics", "iran": "geopolitics",
         "israel": "geopolitics", "nato": "geopolitics", "military": "geopolitics",
         "nuclear": "geopolitics", "ceasefire": "geopolitics",
+        "sanctions": "geopolitics", "world": "geopolitics",
         "economics": "economics", "economy": "economics",
         "federal reserve": "economics", "fed": "economics",
         "interest rates": "economics", "inflation": "economics",
         "recession": "economics", "gdp": "economics",
         "economic policy": "economics", "tariff": "economics",
+        "finance": "economics", "business": "economics",
         "crypto": "crypto", "cryptocurrency": "crypto",
         "bitcoin": "crypto", "ethereum": "crypto",
         "defi": "crypto", "nft": "crypto", "web3": "crypto",
         "solana": "crypto", "btc": "crypto",
+        "pre-market": "crypto", "fdv": "crypto", "token launch": "crypto",
+        "crypto prices": "crypto", "hit price": "crypto",
         "ai": "tech", "artificial intelligence": "tech",
         "tech": "tech", "technology": "tech",
         "openai": "tech", "antitrust": "tech",
+        "big tech": "tech", "ipo": "tech",
+        "celebrities": "politics",   # celebrity markets tend to be pop-culture politics
     }
     for tag in tags:
         cat = label_map.get(tag)
@@ -208,86 +154,37 @@ def _category_from_title(title: str) -> str:
     if any(k in t for k in ("bitcoin", "ethereum", "crypto", "btc", "eth", "defi", "solana",
                              "uni ", "aave", "chainlink", "polygon", "matic", "avax",
                              "base chain", "hyperliquid", "token", "coin price",
-                             "market cap", "altcoin")):
+                             "market cap", "altcoin", "nft", "web3", "blockchain",
+                             "binance", "coinbase", "ftx", "pump.fun", "fdv")):
         return "crypto"
     if any(k in t for k in ("fed ", "fomc", "rate cut", "rate hike", "cpi", "recession",
-                             "inflation", "gdp", "tariff", "trade war", "unemployment")):
+                             "inflation", "gdp", "tariff", "trade war", "unemployment",
+                             "interest rate", "treasury yield", "fiscal", "deficit",
+                             "budget", "shutdown", "debt ceiling", "imf", "world bank")):
         return "economics"
     if any(k in t for k in ("war", "invasion", "ceasefire", "nato", "nuclear", "missile",
                              "airspace", "sanction", "iran", "ukraine", "russia", "israel",
-                             "china", "taiwan", "north korea", "military", "troops")):
+                             "china", "taiwan", "north korea", "military", "troops",
+                             "gaza", "hamas", "hezbollah", "putin", "xi jinping",
+                             "kim jong", "zelensky", "middle east", "coup")):
         return "geopolitics"
     if any(k in t for k in ("president", "congress", "senate", "election", "vote",
                              "trump", "democrat", "republican", "white house", "impeach",
-                             "supreme court", "veto", "executive order", "pardon")):
+                             "supreme court", "veto", "executive order", "pardon",
+                             "governor", "mayor", "nominee", "primary", "ballot",
+                             "harris", "biden", "pelosi", "schumer", "mcconnell",
+                             "elon musk", "government shutdown", "legislation", "bill ",
+                             "act ", "policy", "cabinet", "administration")):
         return "politics"
     if any(k in t for k in ("openai", "anthropic", "google", "microsoft", "apple",
-                             "ai ", "ipo", "antitrust", "tech", "startup")):
+                             "ai ", "ipo", "antitrust", "tech", "startup",
+                             "nvidia", "meta ", "amazon", "tesla", "spacex",
+                             "tiktok", "snapchat", "x.com", "twitter", "linkedin",
+                             "samsung", "qualcomm", "amd ", "intel ", "arm ",
+                             "chatgpt", "gemini", "grok", "llm", "artificial intel",
+                             "software", "semiconductor", "data center", "cloud")):
         return "tech"
     return ""
-
-
-def build_category_map(gamma_events: list[dict]) -> dict[str, str]:
-    """
-    Build {condition_id: category} from Gamma events using tag slug mapping.
-    Falls back to title keyword matching.
-    """
-    cat_map = {}
-    for ev in gamma_events:
-        markets   = ev.get("markets", [])
-        tag_slugs = _event_tag_slugs(ev)
-
-        # Block sports events entirely
-        if tag_slugs & _SPORTS_SLUGS:
-            continue
-
-        # Map slugs to category
-        category = ""
-        for slug in tag_slugs:
-            if slug in _TAG_TO_CATEGORY:
-                category = _TAG_TO_CATEGORY[slug]
-                break
-
-        # Fallback to title keyword matching
-        if not category:
-            ev_title = ev.get("title", "")
-            category = _category_from_title(ev_title)
-            if not category:
-                # Try first market question
-                for m in markets[:1]:
-                    category = _category_from_title(m.get("question", ""))
-                    if category:
-                        break
-
-        if not category:
-            continue
-
-        for m in markets:
-            cid = m.get("conditionId") or m.get("condition_id")
-            if cid:
-                cat_map[cid] = category
-
-    return cat_map
-
-
-def build_vol_map(gamma_events: list[dict]) -> dict[str, dict]:
-    """
-    Build {condition_id: {volume24hr, liquidity}} from Gamma events.
-
-    Gamma market objects (inside events) have conditionId, volume24hr, and liquidity
-    as reliable numeric fields. sampling-markets has none of these.
-    """
-    vol_map = {}
-    for ev in gamma_events:
-        for m in ev.get("markets", []):
-            cid = m.get("conditionId") or m.get("condition_id")
-            if not cid:
-                continue
-            vol_map[cid] = {
-                "volume_24h": float(m.get("volume24hr") or 0),
-                "liquidity":  float(m.get("liquidity")  or 0),
-            }
-    return vol_map
 
 
 def is_sports(tag_slugs: set) -> bool:
@@ -309,15 +206,7 @@ def scan():
         log(f"ERROR fetch_sampling_markets: {e}")
         return 0
 
-    log(f"fetched {len(markets)} markets — fetching gamma events...")
-    try:
-        gamma_events = fetch_gamma_events(limit=500)
-        cat_map      = build_category_map(gamma_events)
-        vol_map      = build_vol_map(gamma_events)
-    except Exception as e:
-        log(f"WARN could not fetch gamma events: {e}")
-        cat_map = {}
-        vol_map = {}
+    log(f"fetched {len(markets)} markets — running pass1...")
 
     seen_ids = load_seen_ids()
     signals  = 0
@@ -326,7 +215,7 @@ def scan():
     # /sampling-markets: condition_id, tags=plain strings, volume24hr=None
     # Category from string tags + title fallback. No volume filter (None on this endpoint).
     candidates = []
-    skip_stats = {"dedup":0,"not_binary":0,"sports":0,"vol_liq":0,"no_cat":0,"no_token":0,"price_range":0}
+    skip_stats = {"dedup":0,"not_binary":0,"sports":0,"no_cat":0,"no_token":0,"price_range":0}
 
     for mkt in markets:
         try:
@@ -338,16 +227,6 @@ def scan():
 
             if not is_binary_market(mkt):
                 skip_stats["not_binary"] += 1
-                continue
-
-            # Volume + liquidity from gamma vol_map (indexed by conditionId).
-            # sampling-markets has no volume fields; gamma market objects do.
-            # Markets not in vol_map (not yet in gamma) are treated as zero volume.
-            vol_info = vol_map.get(cid, {})
-            vol24h   = vol_info.get("volume_24h", 0.0)
-            liq      = vol_info.get("liquidity",  0.0)
-            if vol24h < MIN_VOLUME_24H or liq < MIN_LIQUIDITY:
-                skip_stats["vol_liq"] += 1
                 continue
 
             # Tags are plain strings on /sampling-markets
@@ -397,8 +276,6 @@ def scan():
                 "token_id_yes": token_id,
                 "token_id_no":  no_token_id,
                 "tags":         list(tags),
-                "volume_24h":   vol24h,
-                "liquidity":    liq,
             })
 
         except Exception as e:
@@ -416,14 +293,30 @@ def scan():
         try:
             token_id = c["token_id_yes"]
 
-            # Live YES price
+            # ── Gamma vol/liq gate — first, before any CLOB calls ─────
+            # Kills ~98% of candidates cheaply. Gamma is a single fast HTTP
+            # call; CLOB price-history is slow. No point fetching history for
+            # markets that will fail vol/liq anyway.
+            gm = fetch_gamma_market_by_token(token_id)
+            if gm is None:
+                continue
+            vol24h = float(gm.get("volume24hr") or 0)
+            liq    = float(gm.get("liquidity")  or 0)
+            if vol24h < MIN_VOLUME_24H or liq < MIN_LIQUIDITY:
+                continue
+
+            # Use gamma's category as a fallback if pass1 couldn't assign one
+            category = c["category"] or str(gm.get("category") or "").lower().strip()
+            if not category:
+                continue
+
+            # ── CLOB price checks — only on vol/liq survivors ─────────
             yes_now = fetch_last_trade_price(token_id)
             if yes_now is None:
                 continue
             if not (YES_PRICE_MIN <= yes_now <= YES_PRICE_MAX):
                 continue
 
-            # 60-min price history
             yes_60m = get_price_60min_ago(token_id)
             if yes_60m is None or yes_60m <= 0:
                 continue
@@ -432,7 +325,7 @@ def scan():
             if move_pct < ENTRY_MIN_MOVE_60MIN:
                 continue
 
-            # ── Signal confirmed ───────────────────────────────────
+            # ── Signal confirmed ───────────────────────────────────────
             cid      = c["cid"]
             question = c["question"]
 
@@ -443,16 +336,15 @@ def scan():
                 "signal_id":       f"{cid}_{int(time.time())}",
                 "condition_id":    cid,
                 "question":        question,
-                "category":        c["category"],
+                "category":        category,
                 "token_id_yes":    token_id,
                 "token_id_no":     c["token_id_no"],
                 "tags":            c.get("tags", []),
                 "yes_price_60m":   round(yes_60m,  4),
                 "yes_price_now":   round(yes_now,  4),
                 "move_pct":        round(move_pct, 2),
-                "history_depth":   history_depth,         # 24h price-update count (liquidity proxy)
-                "volume_24h":      c.get("volume_24h"),   # from gamma events volume24hr
-                "liquidity":       c.get("liquidity"),     # from gamma events liquidity
+                "volume_24h":      round(vol24h, 2),
+                "liquidity":       round(liq, 2),
                 "base_rate":       base_rate,
                 "base_rate_label": br_label,
                 "news_at_signal":  news,
