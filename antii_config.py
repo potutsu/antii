@@ -19,11 +19,12 @@ ENTRY_MAX_WAIT_MIN      = int(os.environ.get("ENTRY_MAX_WAIT_MIN",        120)) 
 EXIT_REVERT_PCT         = float(os.environ.get("EXIT_REVERT_PCT",         10.0))  # % drop from entry price → take profit
 EXIT_MAX_HOLD_HOURS     = float(os.environ.get("EXIT_MAX_HOLD_HOURS",     48.0))  # force close after N hours
 EXIT_STOP_LOSS_PCT      = float(os.environ.get("EXIT_STOP_LOSS_PCT",      15.0))  # % rise from entry → stop loss
+EXIT_RESOLUTION_PCT     = float(os.environ.get("EXIT_RESOLUTION_PCT",      2.0))  # YES <= this % → treat as resolved NO
 
 # ── Market Filters ─────────────────────────────────────────────────
 MIN_VOLUME_24H          = float(os.environ.get("MIN_VOLUME_24H",          5000))  # USD — from gamma events volume24hr
 MIN_LIQUIDITY           = float(os.environ.get("MIN_LIQUIDITY",           2000))  # USD — from gamma events liquidity
-YES_PRICE_MIN           = float(os.environ.get("YES_PRICE_MIN",           0.05))
+YES_PRICE_MIN           = float(os.environ.get("YES_PRICE_MIN",           0.25))
 YES_PRICE_MAX           = float(os.environ.get("YES_PRICE_MAX",           0.45))
 ALLOWED_CATEGORIES      = {"politics", "geopolitics", "economics", "crypto", "tech"}
 SPORTS_TAGS             = {"sports", "nfl", "nba", "mlb", "nhl", "soccer", "football",
@@ -52,7 +53,7 @@ ALERT_CHAT_ID           = os.environ.get("ANTII_CHAT_ID", "")
 # ── Manager Behaviour ──────────────────────────────────────────────
 STARTUP_DELAY_SEC       = 1.5
 RESTART_COOLDOWN_SEC    = 10
-MAX_RESTARTS            = 5
+MAX_RESTARTS            = 20   # raised from 5 — workers must stay alive
 RESTART_RESET_SEC       = 600
 ON_CRASH                = "restart+alert"   # restart+alert | restart_only | alert_only | none
 REFRESH_SEC             = 1

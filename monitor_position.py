@@ -23,6 +23,7 @@ from antii_config import (
     EXIT_REVERT_PCT,
     EXIT_STOP_LOSS_PCT,
     EXIT_MAX_HOLD_HOURS,
+    EXIT_RESOLUTION_PCT,
 )
 from paths import ensure_dirs, PAPER_POSITIONS, VERDICTS_JSONL
 from polymarket import fetch_last_trade_price
@@ -120,6 +121,15 @@ def check_position(pos: dict) -> tuple[bool, float | None, str]:
     if px is None:
         return False, None, ""
 
+    # ── Resolution detection ───────────────────────────────────────
+    # When a market resolves NO, YES tokens settle to ~$0.00.
+    # last-trade-price freezes at pre-resolution price and never
+    # hits our take_profit threshold. Check explicitly: if YES has
+    # collapsed to EXIT_RESOLUTION_PCT (default 2%), treat as resolved.
+    # This captures near-full gain on NO position.
+    if px <= EXIT_RESOLUTION_PCT / 100:
+        return True, px, "resolution"
+
     drop_pct = (entry_yes - px) / entry_yes * 100   # positive = YES fell = we win
     rise_pct = (px - entry_yes) / entry_yes * 100    # positive = YES rose = we lose
 
@@ -135,7 +145,8 @@ def check_position(pos: dict) -> tuple[bool, float | None, str]:
 def main():
     ensure_dirs()
     log("monitor_position started")
-    emitted_exits = load_emitted_exit_ids()
+    emitted_exits  = load_emitted_exit_ids()
+    last_price_seen: dict[str, tuple[float, float]] = {}  # pid → (price, first_seen_ts)
 
     while True:
         try:
@@ -148,6 +159,22 @@ def main():
 
                 try:
                     should_exit, px, reason = check_position(pos)
+
+                    # ── Stale price guard ──────────────────────────
+                    # If the price hasn't moved in 24h the market is
+                    # likely resolved or dead. Force-close to free capital.
+                    if px is not None:
+                        prev_px, first_ts = last_price_seen.get(pid, (px, time.time()))
+                        if abs(px - prev_px) < 0.001:
+                            stale_hours = (time.time() - first_ts) / 3600
+                            if stale_hours >= 24:
+                                should_exit = True
+                                reason = "stale_price"
+                        else:
+                            last_price_seen[pid] = (px, time.time())
+                        if pid not in last_price_seen:
+                            last_price_seen[pid] = (px, time.time())
+
                     if should_exit and px is not None:
                         emit_exit_verdict(pos, px, reason)
                         emitted_exits.add(pid)
