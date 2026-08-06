@@ -455,9 +455,18 @@ class DashHandler(BaseHTTPRequestHandler):
 
 
 def http_server_loop():
-    server = HTTPServer(("0.0.0.0", PORT), DashHandler)
-    mlog(f"dashboard → http://localhost:{PORT}")
-    server.serve_forever()
+    from socketserver import TCPServer
+    TCPServer.allow_reuse_address = True
+    # Try PORT, then fallbacks if still in use
+    for port in [PORT, PORT+1, PORT+2, 8080, 8888]:
+        try:
+            server = HTTPServer(("0.0.0.0", port), DashHandler)
+            mlog(f"dashboard → http://localhost:{port}")
+            server.serve_forever()
+            return
+        except OSError:
+            mlog(f"port {port} in use, trying next...")
+    mlog("ERROR: could not bind dashboard to any port")
 
 
 # ── CLI input ─────────────────────────────────────────────────────
