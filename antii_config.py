@@ -44,6 +44,10 @@ SHADOW_POLL_SEC         = int(os.environ.get("SHADOW_POLL_SEC",           900)) 
 SHADOW_POST_CLOSE_HOURS = float(os.environ.get("SHADOW_POST_CLOSE_HOURS", 72.0))  # hours after close
 
 # ── Finnhub ────────────────────────────────────────────────────────
+NEWSDATA_API_KEY     = os.environ.get("NEWSDATA_API_KEY", "")
+WALLET_COMBOS_CSV    = os.environ.get("WALLET_COMBOS_CSV",
+                        str(BASE_DIR / "data" / "edge_combos.csv"))
+WALLET_ACTIVITY_DAYS = int(os.environ.get("WALLET_ACTIVITY_DAYS", 30))
 FINNHUB_API_KEY         = os.environ.get("FINNHUB_API_KEY", "")
 
 # ── Telegram Alerts ────────────────────────────────────────────────
@@ -66,12 +70,12 @@ _L = str(BASE_DIR / "logs")
 SCRIPTS = [
     # ── Pipeline workers (start manually) ─────────────────────────
     {
-        "name":  "discovery",
+        "name":  "wallet_watcher",
         "key":   "1",
         "group": "pipeline",
-        "desc":  "Scans Polymarket for overreaction signals",
-        "path":  str(BASE_DIR / "discovery.py"),
-        "log":   f"{_L}/discovery.log",
+        "desc":  "Watches wallet × category combos, emits signals",
+        "path":  str(BASE_DIR / "wallet_watcher.py"),
+        "log":   f"{_L}/wallet_watcher.log",
     },
     {
         "name":  "monitor_entry",
