@@ -114,46 +114,43 @@ def load_combos() -> list[dict]:
 
 # ── Activity check ────────────────────────────────────────────────
 def get_last_activity_days(address: str) -> float:
-    """Returns days since last closed position. Large number = inactive."""
+    """Returns days since last trade. Uses activity endpoint with unix timestamp field."""
     try:
-        data = _get(f"{DATA_API}/positions", {
-            "user":   address,
-            "limit":  5,
-            "closed": "true",
+        data = _get(f"{DATA_API}/activity", {
+            "user":  address,
+            "limit": 5,
         })
-        if not data:
+        if not data or not isinstance(data, list):
             return 999
         timestamps = []
         for p in data:
-            ts_val = p.get("closedAt") or p.get("closeTs") or p.get("updatedAt")
+            ts_val = p.get("timestamp")
             if ts_val:
-                # Handle ISO string or unix timestamp
-                if isinstance(ts_val, str):
-                    try:
-                        dt = datetime.fromisoformat(ts_val.replace("Z", "+00:00"))
-                        timestamps.append(dt.timestamp())
-                    except Exception:
-                        pass
-                elif isinstance(ts_val, (int, float)):
+                try:
                     timestamps.append(float(ts_val))
+                except Exception:
+                    pass
         if not timestamps:
             return 999
         latest = max(timestamps)
-        return (time.time() - latest) / 86400
-    except Exception:
+        days = (time.time() - latest) / 86400
+        return round(days, 1)
+    except Exception as e:
         return 999
 
 
-# ── Fetch current open positions ──────────────────────────────────
-def get_open_positions(address: str) -> list[dict]:
-    """Fetch currently open positions for a wallet."""
+# ── Fetch recent activity ────────────────────────────────────────
+def get_recent_activity(address: str, limit: int = 50) -> list[dict]:
+    """Fetch recent trade activity for a wallet.
+    Returns list of trades with conditionId, price, side, title, timestamp."""
     try:
-        data = _get(f"{DATA_API}/positions", {
-            "user":   address,
-            "limit":  MAX_POSITIONS_FETCH,
-            "closed": "false",
+        data = _get(f"{DATA_API}/activity", {
+            "user":  address,
+            "limit": limit,
         })
-        return data if isinstance(data, list) else []
+        # Only TRADE type, not transfers etc
+        trades = [t for t in (data or []) if t.get("type") == "TRADE"]
+        return trades
     except Exception:
         return []
 
@@ -264,40 +261,48 @@ def emit_signal(record: dict):
 def scan(combos: list[dict], seen_ids: set):
     new_signals = 0
 
-    # Group by address to avoid re-fetching same wallet multiple times
-    # (wallet may appear under multiple categories)
-    wallets_seen_this_scan: dict[str, dict] = {}  # address -> {positions, activity_days}
+    # Cache per address so we don't re-fetch same wallet for multiple categories
+    wallets_seen_this_scan: dict[str, list] = {}  # address -> activity list
 
     for combo in combos:
         address  = combo["address"]
         category = combo["category"]
 
-        # ── Activity check ────────────────────────────────────────
+        # ── Fetch activity (once per wallet per scan) ─────────────
         if address not in wallets_seen_this_scan:
             activity_days = get_last_activity_days(address)
-            positions     = get_open_positions(address) if activity_days <= WALLET_ACTIVITY_DAYS else []
-            wallets_seen_this_scan[address] = {
-                "activity_days": activity_days,
-                "positions":     positions,
-            }
             if activity_days > WALLET_ACTIVITY_DAYS:
-                log(f"skip {address[:12]}… inactive ({activity_days:.0f}d since last trade)")
+                log(f"skip {address[:12]}… inactive ({activity_days:.1f}d)")
+                wallets_seen_this_scan[address] = []
                 time.sleep(0.3)
                 continue
+            trades = get_recent_activity(address, limit=50)
+            wallets_seen_this_scan[address] = trades
+            log(f"active {address[:12]}… {activity_days:.1f}d ago | {len(trades)} recent trades")
+            time.sleep(0.4)
 
-        info      = wallets_seen_this_scan[address]
-        positions = info["positions"]
-
-        if not positions:
+        trades = wallets_seen_this_scan[address]
+        if not trades:
             continue
 
-        for pos in positions:
-            condition_id = pos.get("conditionId") or pos.get("market", {}).get("conditionId") if isinstance(pos.get("market"), dict) else None
+        for trade in trades:
+            condition_id = trade.get("conditionId")
             if not condition_id:
                 continue
 
             signal_id = make_signal_id(condition_id, address)
             if signal_id in seen_ids:
+                continue
+
+            # ── Trade direction from activity ─────────────────────
+            # side=BUY outcome=Yes  → wallet is bullish YES
+            # side=BUY outcome=No   → wallet is bullish NO
+            side    = trade.get("side", "").upper()    # BUY | SELL
+            outcome = trade.get("outcome", "").upper() # Yes | No
+            wallet_price = float(trade.get("price") or 0)
+
+            # Only follow BUY signals — wallet is opening/adding, not exiting
+            if side != "BUY":
                 continue
 
             # ── Get market metadata ───────────────────────────────
@@ -321,26 +326,30 @@ def scan(combos: list[dict], seen_ids: set):
                 continue
 
             # ── News ──────────────────────────────────────────────
-            news = fetch_news(meta["question"], category)
+            question = meta.get("question") or trade.get("title", "")
+            news = fetch_news(question, category)
             time.sleep(0.2)
 
             # ── Emit signal ───────────────────────────────────────
             now = time.time()
             record = {
-                "signal_id":       signal_id,
-                "condition_id":    condition_id,
-                "question":        meta["question"],
-                "category":        category,
-                "token_id_yes":    meta["token_id_yes"],
-                "token_id_no":     meta["token_id_no"],
-                "yes_price_now":   round(yes_price, 4),
-                "move_pct":        0.0,          # wallet copy — no spike to measure
-                "volume_24h":      meta.get("volume_24h", 0),
-                "liquidity":       meta.get("liquidity", 0),
-                "signal_ts":       now,
-                "signal_iso":      datetime.now(timezone.utc).isoformat(),
-                "status":          "new",
-                "source":          "wallet_copy",
+                "signal_id":          signal_id,
+                "condition_id":       condition_id,
+                "question":           question,
+                "category":           category,
+                "token_id_yes":       meta["token_id_yes"],
+                "token_id_no":        meta["token_id_no"],
+                "yes_price_now":      round(yes_price, 4),
+                "move_pct":           0.0,
+                "volume_24h":         meta.get("volume_24h", 0),
+                "liquidity":          meta.get("liquidity", 0),
+                "signal_ts":          now,
+                "signal_iso":         datetime.now(timezone.utc).isoformat(),
+                "status":             "new",
+                "source":             "wallet_copy",
+                "wallet_side":        side,
+                "wallet_outcome":     outcome,
+                "wallet_price":       wallet_price,
                 "source_wallet":   address,
                 "source_win_rate": combo["win_rate"],
                 "source_trades":   combo["trades"],
