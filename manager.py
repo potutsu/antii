@@ -126,12 +126,49 @@ def _read_stats():
         pass
     return s
 
+STATUS_JSON = _HERE / "data" / "status.json"
+
+def _write_status_json():
+    """Write current worker state to data/status.json for bot to read."""
+    try:
+        with state_lock:
+            workers = {}
+            for name, info in state.items():
+                workers[name] = {
+                    "status":   info.get("status", "UNKNOWN"),
+                    "pid":      info.get("pid"),
+                    "uptime":   format_uptime(info.get("start_ts")),
+                    "restarts": info.get("restarts", 0),
+                    "group":    info.get("group", "pipeline"),
+                    "last_log": (info.get("log_buf") or [""])[-1][:120],
+                }
+        with _stats_lock:
+            stats_snap = dict(_stats)
+
+        payload = {
+            "updated_ts":  time.time(),
+            "updated_iso": now_iso(),
+            "mode":        MODE,
+            "version":     VERSION,
+            "manager_uptime": format_uptime(start_time),
+            "workers":     workers,
+            "stats":       stats_snap,
+        }
+        STATUS_JSON.parent.mkdir(parents=True, exist_ok=True)
+        tmp = str(STATUS_JSON) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, STATUS_JSON)
+    except Exception:
+        pass
+
 def stats_loop():
     while running:
         try:
             s = _read_stats()
             with _stats_lock:
                 _stats.update(s)
+            _write_status_json()
         except Exception:
             pass
         time.sleep(15)

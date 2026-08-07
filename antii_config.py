@@ -118,4 +118,12 @@ SCRIPTS = [
         "path":  str(BASE_DIR / "shadow.py"),
         "log":   f"{_L}/shadow.log",
     },
+    {
+        "name":  "telegram_bot",
+        "key":   "7",
+        "group": "background",
+        "desc":  "User-initiated status bot",
+        "path":  str(BASE_DIR / "telegram_bot.py"),
+        "log":   f"{_L}/telegram_bot.log",
+    },
 ]
