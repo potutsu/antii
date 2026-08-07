@@ -12,6 +12,14 @@ BASE_DIR = Path(__file__).resolve().parent
 # ── Mode ───────────────────────────────────────────────────────────
 MODE = os.environ.get("ANTII_MODE", "paper")   # paper | live
 
+
+# ── Signal Mode ─────────────────────────────────────────────────────
+# overreaction  : original strategy — wait for price reversion before entry
+#                 exit when YES drops (take profit) or rises (stop loss)
+# wallet_copy   : new strategy — enter immediately on wallet signal
+#                 exit when wallet exits same market, or max hold
+SIGNAL_MODE = os.environ.get("SIGNAL_MODE", "wallet_copy")
+
 # ── Strategy Parameters ────────────────────────────────────────────
 ENTRY_MIN_MOVE_60MIN    = float(os.environ.get("ENTRY_MIN_MOVE_60MIN",    7.0))   # % YES price rise in last 60 min
 ENTRY_MIN_REVERT_PCT    = float(os.environ.get("ENTRY_MIN_REVERT_PCT",    3.0))   # % drop from signal price to confirm entry

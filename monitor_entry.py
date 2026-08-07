@@ -27,6 +27,7 @@ from antii_config import (
     YES_PRICE_MAX,
     MAX_WATCHED_SIGNALS,
     MAX_OPEN_POSITIONS,
+    SIGNAL_MODE,
 )
 from paths import ensure_dirs, SIGNAL_JSONL, VERDICTS_JSONL, PAPER_POSITIONS
 from polymarket import fetch_last_trade_price
@@ -108,11 +109,14 @@ def process_signal(sig: dict, open_positions: int) -> tuple[str | None, dict | N
     """
     Returns (new_status, verdict_or_None, current_price_or_None)
     new_status: None = no change, "watching", "entered", "discarded"
+
+    SIGNAL_MODE=wallet_copy : enter immediately, no reversion wait
+    SIGNAL_MODE=overreaction: original logic, wait for 3% reversion
     """
-    token_id    = sig["token_id_yes"]
-    signal_px   = sig["yes_price_now"]
-    signal_ts   = sig["signal_ts"]
-    age_min     = (time.time() - signal_ts) / 60.0
+    token_id  = sig["token_id_yes"]
+    signal_px = sig["yes_price_now"]
+    signal_ts = sig["signal_ts"]
+    age_min   = (time.time() - signal_ts) / 60.0
 
     try:
         current_px = fetch_last_trade_price(token_id)
@@ -123,23 +127,37 @@ def process_signal(sig: dict, open_positions: int) -> tuple[str | None, dict | N
     if current_px is None:
         return None, None, None
 
-    # ── Out of valid price range — discard ─────────────────────────
+    # ── Position cap — both modes ──────────────────────────────────
+    if open_positions >= MAX_OPEN_POSITIONS:
+        v = make_verdict(sig, "DISCARD", current_px, "position_cap_reached")
+        return "discarded", v, current_px
+
+    # ══════════════════════════════════════════════════════════════
+    # WALLET COPY MODE — enter immediately on signal
+    # ══════════════════════════════════════════════════════════════
+    if SIGNAL_MODE == "wallet_copy":
+        # Only discard if signal is stale (> 10 min old, wallet already moved on)
+        if age_min > 10:
+            v = make_verdict(sig, "DISCARD", current_px, "stale_wallet_signal")
+            return "discarded", v, current_px
+        v = make_verdict(sig, "ENTER", current_px, "wallet_copy_immediate")
+        return "entered", v, current_px
+
+    # ══════════════════════════════════════════════════════════════
+    # OVERREACTION MODE — wait for reversion
+    # ══════════════════════════════════════════════════════════════
+    # Out of valid price range — discard
     if not (YES_PRICE_MIN <= current_px <= YES_PRICE_MAX):
         v = make_verdict(sig, "DISCARD", current_px, "price_out_of_range")
         return "discarded", v, current_px
 
-    # ── Reversion confirmed — enter ────────────────────────────────
+    # Reversion confirmed — enter
     drop_pct = (signal_px - current_px) / signal_px * 100
     if drop_pct >= ENTRY_MIN_REVERT_PCT:
-        if open_positions >= MAX_OPEN_POSITIONS:
-            v = make_verdict(sig, "DISCARD", current_px, "position_cap_reached")
-            return "discarded", v, current_px
         v = make_verdict(sig, "ENTER", current_px, "reversion_confirmed")
         return "entered", v, current_px
 
-    # ── Timeout — discard if no reversion within the watch window ──
-    # Entering at signal price has no edge: it means the spike didn't fade,
-    # which is evidence the move was real (not overreaction). Discard only.
+    # Timeout — discard if no reversion within watch window
     if age_min >= ENTRY_MAX_WAIT_MIN:
         v = make_verdict(sig, "DISCARD", current_px, "no_reversion_timeout")
         return "discarded", v, current_px

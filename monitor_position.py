@@ -24,6 +24,7 @@ from antii_config import (
     EXIT_STOP_LOSS_PCT,
     EXIT_MAX_HOLD_HOURS,
     EXIT_RESOLUTION_PCT,
+    SIGNAL_MODE,
 )
 from paths import ensure_dirs, PAPER_POSITIONS, VERDICTS_JSONL
 from polymarket import fetch_last_trade_price
@@ -98,18 +99,26 @@ def emit_exit_verdict(pos: dict, exit_price: float, reason: str):
 def check_position(pos: dict) -> tuple[bool, float | None, str]:
     """
     Returns (should_exit, current_yes_price, reason)
-    """
-    entry_yes   = pos["entry_yes_price"]
-    open_ts     = pos.get("open_ts", time.time())
-    age_hours   = (time.time() - open_ts) / 3600.0
-    token_id    = pos["token_id_yes"]
 
-    # Max hold check first (no price fetch needed)
+    SIGNAL_MODE=wallet_copy:
+        - Exit when wallet exits same market (SELL detected in activity)
+        - Fallback: max_hold, resolution, stop_loss (wider: 25%)
+        - No take_profit based on % drop — let wallet decide when to exit
+
+    SIGNAL_MODE=overreaction:
+        - Original logic: take_profit on DROP, stop_loss on RISE
+    """
+    entry_yes = pos["entry_yes_price"]
+    open_ts   = pos.get("open_ts", time.time())
+    age_hours = (time.time() - open_ts) / 3600.0
+    token_id  = pos["token_id_yes"]
+
+    # ── Max hold — both modes ──────────────────────────────────────
     if age_hours >= EXIT_MAX_HOLD_HOURS:
         try:
             px = fetch_last_trade_price(token_id)
         except Exception:
-            px = entry_yes  # use entry as fallback for forced exit
+            px = entry_yes
         return True, px, "max_hold"
 
     try:
@@ -121,18 +130,40 @@ def check_position(pos: dict) -> tuple[bool, float | None, str]:
     if px is None:
         return False, None, ""
 
-    # ── Resolution detection ───────────────────────────────────────
-    # When a market resolves NO, YES tokens settle to ~$0.00.
-    # last-trade-price freezes at pre-resolution price and never
-    # hits our take_profit threshold. Check explicitly: if YES has
-    # collapsed to EXIT_RESOLUTION_PCT (default 2%), treat as resolved.
-    # This captures near-full gain on NO position.
+    # ── Resolution detection — both modes ──────────────────────────
     if px <= EXIT_RESOLUTION_PCT / 100:
         return True, px, "resolution"
 
-    drop_pct = (entry_yes - px) / entry_yes * 100   # positive = YES fell = we win
-    rise_pct = (px - entry_yes) / entry_yes * 100    # positive = YES rose = we lose
+    rise_pct = (px - entry_yes) / entry_yes * 100
+    drop_pct = (entry_yes - px) / entry_yes * 100
 
+    # ══════════════════════════════════════════════════════════════
+    # WALLET COPY MODE
+    # ══════════════════════════════════════════════════════════════
+    if SIGNAL_MODE == "wallet_copy":
+        # Wallet exit check — see if source wallet has sold this market
+        source_wallet = pos.get("source_wallet")
+        condition_id  = pos.get("condition_id")
+        if source_wallet and condition_id:
+            wallet_exited = check_wallet_exited(source_wallet, condition_id)
+            if wallet_exited:
+                return True, px, "wallet_exited"
+
+        # Wider stop loss for copy trading (25% vs 15%)
+        # We trust the wallet more, give it more room
+        COPY_STOP_LOSS = EXIT_STOP_LOSS_PCT * 1.67  # ~25%
+        if rise_pct >= COPY_STOP_LOSS:
+            return True, px, "stop_loss"
+
+        # Take profit if market moved strongly in our favour
+        if drop_pct >= EXIT_REVERT_PCT:
+            return True, px, "take_profit"
+
+        return False, px, ""
+
+    # ══════════════════════════════════════════════════════════════
+    # OVERREACTION MODE — original logic
+    # ══════════════════════════════════════════════════════════════
     if drop_pct >= EXIT_REVERT_PCT:
         return True, px, "take_profit"
 
@@ -140,6 +171,28 @@ def check_position(pos: dict) -> tuple[bool, float | None, str]:
         return True, px, "stop_loss"
 
     return False, px, ""
+
+
+def check_wallet_exited(wallet: str, condition_id: str) -> bool:
+    """Check if source wallet has recently sold this market (exit signal)."""
+    try:
+        import requests
+        r = requests.get(
+            "https://data-api.polymarket.com/activity",
+            params={"user": wallet, "limit": 20},
+            headers={"User-Agent": "antii/2.0", "Referer": "https://polymarket.com/"},
+            timeout=10,
+        )
+        if not r.ok:
+            return False
+        for trade in r.json() or []:
+            if (trade.get("conditionId") == condition_id
+                    and trade.get("type") == "TRADE"
+                    and trade.get("side", "").upper() == "SELL"):
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def main():
