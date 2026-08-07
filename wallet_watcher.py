@@ -140,16 +140,23 @@ def get_last_activity_days(address: str) -> float:
 
 
 # ── Fetch recent activity ────────────────────────────────────────
-def get_recent_activity(address: str, limit: int = 50) -> list[dict]:
-    """Fetch recent trade activity for a wallet.
-    Returns list of trades with conditionId, price, side, title, timestamp."""
+ACTIVITY_LOOKBACK_DAYS = int(os.environ.get("ACTIVITY_LOOKBACK_DAYS", 7))
+
+def get_recent_activity(address: str, limit: int = 100) -> list[dict]:
+    """Fetch recent BUY trades from the last ACTIVITY_LOOKBACK_DAYS days."""
     try:
         data = _get(f"{DATA_API}/activity", {
             "user":  address,
             "limit": limit,
         })
-        # Only TRADE type, not transfers etc
-        trades = [t for t in (data or []) if t.get("type") == "TRADE"]
+        if not data or not isinstance(data, list):
+            return []
+        cutoff = time.time() - (ACTIVITY_LOOKBACK_DAYS * 86400)
+        trades = [
+            t for t in data
+            if t.get("type") == "TRADE"
+            and float(t.get("timestamp") or 0) >= cutoff
+        ]
         return trades
     except Exception:
         return []
@@ -175,6 +182,7 @@ def get_market_meta(condition_id: str) -> dict:
             "token_id_no":  token_no,
             "volume_24h":   float(m.get("volume24hr") or m.get("volumeNum") or 0),
             "liquidity":    float(m.get("liquidity") or m.get("liquidityNum") or 0),
+            "end_date":     m.get("endDate") or m.get("end_date_iso") or "",
         }
     except Exception:
         return {}
@@ -309,6 +317,18 @@ def scan(combos: list[dict], seen_ids: set):
             meta = get_market_meta(condition_id)
             if not meta.get("token_id_yes"):
                 continue
+
+            # ── Resolution date filter — only markets closing within 30 days ──
+            end_date = meta.get("end_date")
+            if end_date:
+                try:
+                    from datetime import date
+                    end_dt = date.fromisoformat(str(end_date)[:10])
+                    days_to_close = (end_dt - date.today()).days
+                    if days_to_close > 30 or days_to_close < 0:
+                        continue
+                except Exception:
+                    pass  # if we can't parse, allow through
 
             # ── Liquidity filter ──────────────────────────────────
             if meta.get("volume_24h", 0) < MIN_VOLUME_24H:
