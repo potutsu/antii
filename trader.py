@@ -109,7 +109,7 @@ def open_position(verdict: dict) -> dict:
         "category":         verdict["category"],
         "token_id_yes":     verdict["token_id_yes"],
         "token_id_no":      verdict["token_id_no"],
-        "strategy_type":    "overreaction",
+        "strategy_type":    SIGNAL_MODE,
         "side":             "NO",                   # always buying NO
         "entry_yes_price":  yes_px,
         "entry_no_cost":    no_cost,
@@ -133,6 +133,13 @@ def open_position(verdict: dict) -> dict:
         "volume_24h":       verdict.get("volume_24h"),
         "liquidity":        verdict.get("liquidity"),
         "news_at_signal":   verdict.get("news_at_signal", []),
+        # wallet copy fields — populated when source=wallet_copy
+        "source":           verdict.get("source", ""),
+        "source_wallet":    verdict.get("source_wallet", ""),
+        "wallet_side":      verdict.get("wallet_side", ""),
+        "wallet_outcome":   verdict.get("wallet_outcome", ""),
+        "wallet_price":     verdict.get("wallet_price", None),
+        "source_win_rate":  verdict.get("source_win_rate", None),
     }
     return pos
 

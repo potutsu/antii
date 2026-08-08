@@ -92,7 +92,7 @@ def make_verdict(signal: dict, action: str, current_price: float, reason: str) -
         "category":     signal["category"],
         "token_id_yes": signal["token_id_yes"],
         "token_id_no":  signal["token_id_no"],
-        "action":       action,           # ENTER | DISCARD
+        "action":       action,
         "reason":       reason,
         "entry_price":  round(current_price, 4),
         "signal_price": signal["yes_price_now"],
@@ -101,7 +101,14 @@ def make_verdict(signal: dict, action: str, current_price: float, reason: str) -
         "volume_24h":   signal.get("volume_24h", 0),
         "liquidity":    signal.get("liquidity", 0),
         "base_rate":    signal.get("base_rate", 0),
-        "news_at_signal": signal.get("news_at_signal", []),
+        "news_at_signal":  signal.get("news_at_signal", []),
+        # pass wallet copy fields through to position
+        "source":          signal.get("source", ""),
+        "source_wallet":   signal.get("source_wallet", ""),
+        "wallet_side":     signal.get("wallet_side", ""),
+        "wallet_outcome":  signal.get("wallet_outcome", ""),
+        "wallet_price":    signal.get("wallet_price", None),
+        "source_win_rate": signal.get("source_win_rate", None),
     }
 
 

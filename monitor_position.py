@@ -139,25 +139,29 @@ def check_position(pos: dict) -> tuple[bool, float | None, str]:
 
     # ══════════════════════════════════════════════════════════════
     # WALLET COPY MODE
+    # Primary exit: wallet sells → we exit
+    # Fallback exits: hard stop loss (35%) or max_hold
+    # NO take_profit based on % — we follow the wallet, not a % target
     # ══════════════════════════════════════════════════════════════
     if SIGNAL_MODE == "wallet_copy":
-        # Wallet exit check — see if source wallet has sold this market
-        source_wallet = pos.get("source_wallet")
-        condition_id  = pos.get("condition_id")
-        if source_wallet and condition_id:
-            wallet_exited = check_wallet_exited(source_wallet, condition_id)
-            if wallet_exited:
-                return True, px, "wallet_exited"
+        # ── Primary: wallet exit signal ───────────────────────────
+        # Only check every 3rd poll to avoid rate limiting
+        # (monitor_position runs every 5 min → check every 15 min)
+        check_ts  = pos.get("_last_wallet_check_ts", 0)
+        check_due = (time.time() - check_ts) >= 900  # 15 min
+        if check_due:
+            source_wallet = pos.get("source_wallet", "")
+            condition_id  = pos.get("condition_id", "")
+            if source_wallet and condition_id:
+                if check_wallet_exited(source_wallet, condition_id):
+                    return True, px, "wallet_exited"
 
-        # Wider stop loss for copy trading (25% vs 15%)
-        # We trust the wallet more, give it more room
-        COPY_STOP_LOSS = EXIT_STOP_LOSS_PCT * 1.67  # ~25%
-        if rise_pct >= COPY_STOP_LOSS:
+        # ── Hard stop loss only — wide, 35% ───────────────────────
+        # Don't TP on % drop. Let the wallet decide when to exit.
+        # Only cut if market moves hard against us.
+        COPY_STOP_LOSS_PCT = 35.0
+        if rise_pct >= COPY_STOP_LOSS_PCT:
             return True, px, "stop_loss"
-
-        # Take profit if market moved strongly in our favour
-        if drop_pct >= EXIT_REVERT_PCT:
-            return True, px, "take_profit"
 
         return False, px, ""
 
