@@ -183,6 +183,12 @@ def close_position(pos: dict, exit_verdict: dict) -> dict:
 def process_enter_verdicts(verdicts: list[dict], processed: set[str]):
     """Open positions for ENTER verdicts not yet acted on."""
     positions = load_positions()
+    # Dedup on load — same signal_id may appear multiple times
+    # due to append races; keep the most recent (last) entry
+    seen_sigs = {}
+    for p in positions:
+        seen_sigs[p["signal_id"]] = p
+    positions = list(seen_sigs.values())
     pos_by_signal = {p["signal_id"]: p for p in positions}
     changed = False
 

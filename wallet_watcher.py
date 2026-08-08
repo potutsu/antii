@@ -239,17 +239,39 @@ def fetch_news(question: str, category: str) -> list[str]:
 
 
 # ── Signal dedup ──────────────────────────────────────────────────
+SEEN_IDS_PATH = SIGNAL_JSONL.parent / "seen_signal_ids.json"
+
 def load_seen_signal_ids() -> set:
+    """Load seen IDs from both signal.jsonl and the persistent seen_ids cache."""
     seen = set()
-    if not SIGNAL_JSONL.exists():
-        return seen
-    for line in open(SIGNAL_JSONL, errors="replace"):
+    # From signal.jsonl
+    if SIGNAL_JSONL.exists():
+        for line in open(SIGNAL_JSONL, errors="replace"):
+            try:
+                s = json.loads(line.strip())
+                sid = s.get("signal_id", "")
+                if sid:
+                    seen.add(sid)
+            except Exception:
+                pass
+    # From persistent cache (survives restarts)
+    if SEEN_IDS_PATH.exists():
         try:
-            s = json.loads(line.strip())
-            seen.add(s.get("signal_id", ""))
+            cached = json.loads(SEEN_IDS_PATH.read_text())
+            seen.update(cached)
         except Exception:
             pass
     return seen
+
+def save_seen_signal_ids(seen: set):
+    """Persist seen IDs so restarts don't re-emit old signals."""
+    try:
+        tmp = str(SEEN_IDS_PATH) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(list(seen), f)
+        import os; os.replace(tmp, SEEN_IDS_PATH)
+    except Exception:
+        pass
 
 
 def make_signal_id(condition_id: str, wallet: str) -> str:
@@ -408,6 +430,8 @@ def main():
             log(f"scanning {len(combos)} combos...")
             n = scan(combos, seen_ids)
             log(f"scan complete — {n} new signals emitted")
+            if n > 0:
+                save_seen_signal_ids(seen_ids)  # persist so restarts don't re-emit
         except Exception as e:
             log(f"ERROR in scan: {e}")
         time.sleep(POLL_SEC)

@@ -257,6 +257,15 @@ def main():
             if trade_size != prev_trade_size:
                 prev_trade_size = trade_size
                 closed = load_closed_positions()
+                # Dedup by position_id — paper_positions.jsonl can have
+                # duplicate lines for same position from append races
+                seen_this_batch = {}
+                for pos in closed:
+                    pid = pos["position_id"]
+                    if pid not in seen_this_batch:
+                        seen_this_batch[pid] = pos
+                closed = list(seen_this_batch.values())
+
                 for pos in closed:
                     pid = pos["position_id"]
                     if pid in computed:
